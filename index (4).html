@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Qo'l bilan boshqariladigan zarrachalar</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:sans-serif}
+  canvas{display:block;width:100vw;height:100vh}
+  /* display:none o'rniga: ba'zi brauzerlar (iOS Safari) yashirin videoni dekodlamaydi */
+  video{position:fixed;left:0;top:0;width:1px;height:1px;opacity:0;pointer-events:none}
+  #info{position:fixed;left:12px;top:10px;color:#9f9;font-size:14px;opacity:.8}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<video id="v" playsinline muted></video>
+<div id="info">Kamerani yoqing...</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const info = document.getElementById('info');
+function resize(){ cv.width = innerWidth; cv.height = innerHeight; }
+resize(); addEventListener('resize', resize);
+
+// ---- Zarrachalar ----
+const N = 900;
+const P = Array.from({length:N}, (_, i) => ({
+  x: Math.random()*innerWidth, y: Math.random()*innerHeight,
+  vx:0, vy:0,
+  k: 0.02 + Math.random()*0.10,   // har biri turlicha "sust" -> iz hosil bo'ladi
+  r: Math.random(),               // tasodifiy qiymat
+  t: i/N                          // halqa/doira uchun pozitsiya
+}));
+
+// ---- Qo'l holati ----
+let hand = null;   // {x, y, fingers}
+function onResults(res){
+  if(!res.multiHandLandmarks || !res.multiHandLandmarks.length){
+    hand = null;
+    info.textContent = 'Qo\'l ko\'rinmayapti';   // 1-tuzatish
+    return;
+  }
+  const L = res.multiHandLandmarks[0];
+  const tips=[8,12,16,20], pips=[6,10,14,18];
+  let fingers = 0;
+  for(let i=0;i<4;i++) if(L[tips[i]].y < L[pips[i]].y) fingers++;
+  const indexUp = L[8].y < L[6].y;               // 5-tuzatish: aynan ko'rsatkich barmoq ko'tarilganmi
+  const W = cv.width, H = cv.height;
+  hand = {
+    tipX: (1-L[8].x)*W, tipY: L[8].y*H,      // ko'rsatkich barmoq uchi (ko'zguda)
+    palmX:(1-L[9].x)*W, palmY: L[9].y*H,      // kaft markazi
+    fingers, indexUp
+  };
+  info.textContent = (fingers===1 && indexUp) ? 'Barmoq: iz qoldirish' :
+                     fingers>=3  ? 'Ochiq kaft: halqa' :
+                     fingers===0 ? 'Musht: shar' : 'Qo\'l topildi';
+}
+
+const hands = new Hands({locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${f}`});
+hands.setOptions({maxNumHands:1, modelComplexity:1, minDetectionConfidence:.6, minTrackingConfidence:.5});
+hands.onResults(onResults);
+
+const video = document.getElementById('v');
+new Camera(video, {
+  onFrame: async () => { await hands.send({image: video}); },
+  width: 640, height: 480
+}).start().catch(e => info.textContent = 'Kamera ruxsati kerak: ' + e);
+
+// ---- Chizish ----
+function target(p, time){
+  const W = cv.width, H = cv.height;
+  if(!hand){                                  // qo'l yo'q: markazda aylanuvchi halqa
+    const a = p.t*Math.PI*2 + time*0.0004, R = Math.min(W,H)*0.22 + p.r*18;
+    return [W/2 + Math.cos(a)*R, H/2 + Math.sin(a)*R];
+  }
+  if(hand.fingers === 1 && hand.indexUp){      // barmoq: uchiga ergashadi
+    return [hand.tipX + (p.r-.5)*30, hand.tipY + (Math.random()-.5)*30];
+  }
+  if(hand.fingers >= 3){                       // ochiq kaft: halqa
+    const a = p.t*Math.PI*2 + time*0.0008, R = 110 + p.r*25;
+    return [hand.palmX + Math.cos(a)*R, hand.palmY + Math.sin(a)*R];
+  }
+  // musht (yoki boshqa): zich shar
+  const a = p.t*Math.PI*2 + time*0.002, R = 90*Math.sqrt(p.r);
+  return [hand.palmX + Math.cos(a)*R, hand.palmY + Math.sin(a)*R];
+}
+
+function frame(time){
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.fillStyle = 'rgba(0,0,0,0.22)';           // iz uchun sekin o'chish
+  ctx.fillRect(0,0,cv.width,cv.height);
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.lineWidth = 1.6;
+
+  for(const p of P){
+    const [tx, ty] = target(p, time);
+    p.vx += (tx - p.x)*p.k*0.25; p.vy += (ty - p.y)*p.k*0.25;
+    p.vx *= 0.84; p.vy *= 0.84;
+    p.x += p.vx; p.y += p.vy;
+
+    const sp = Math.hypot(p.vx, p.vy);
+    const ang = Math.atan2(p.vy, p.vx) + (p.r-.5)*0.8;
+    const len = 4 + Math.min(sp*1.6, 18);
+    const hue = 70 + p.r*50;                     // sariq-yashil
+    ctx.strokeStyle = `hsla(${hue},100%,${55+Math.min(sp*3,25)}%,.9)`;
+    ctx.beginPath();
+    ctx.moveTo(p.x, p.y);
+    ctx.lineTo(p.x - Math.cos(ang)*len, p.y - Math.sin(ang)*len);
+    ctx.stroke();
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
